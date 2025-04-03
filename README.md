@@ -1,2 +1,3 @@
 # RL_BatchCryst
-Experimenting with reinforcement learning agent for batch crystallization applications.
+Reinforcement learning agent for batch crystallization applications.
+Experimental
