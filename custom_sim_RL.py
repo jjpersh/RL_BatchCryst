@@ -104,7 +104,7 @@ class ProcessSimulation:
         D50 = np.interp(0.50, cdf, x_sizes)
         D90 = np.interp(0.90, cdf, x_sizes)
         span = (D90 - D10) / D50
-        return D10, D50, D90, span
+        return D50, span
 
         
     # def save_results(self, filename='results.csv'):
