@@ -19,7 +19,7 @@ class ProcessSimulation:
     Class to simulate and analyze crystallization.
     """
     
-    def __init__(self, trialname):
+    def __init__(self, trialname="TEST"):
         """
         Initialize simulation with given trial name.
         """
