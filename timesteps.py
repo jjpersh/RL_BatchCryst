@@ -76,8 +76,6 @@ for i in range(n_steps):
     liquid = copy.deepcopy(CR01.Phases[0])
     solid = copy.deepcopy(CR01.Phases[1])
 
-CR01.plot_profiles()
-
 # Final Summary
 print("\n--- Summary of D50 and Span ---")
 for i, (D50, span) in enumerate(metrics):
