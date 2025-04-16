@@ -75,11 +75,11 @@ class CrystallizationEnv(gym.Env):
         done = self.current_step >= self.n_steps
 
         return np.array([self.current_temp], dtype=np.float32), reward, done, False, {"D50": D50, "span": span}
-OBOBOB
+
     def compute_d50_span(self, results):
-OBOBOB        final_distrib = results.distrib[-1, :]
+        final_distrib = results.distrib[-1, :]
         x_sizes = results.x_cryst
-OBOBOBOBOBOBOBOBOBOBOBOB        pdf = final_distrib / np.sum(final_distrib)
+        pdf = final_distrib / np.sum(final_distrib)
         cdf = np.cumsum(pdf)
         D10 = np.interp(0.10, cdf, x_sizes)
         D50 = np.interp(0.50, cdf, x_sizes)
