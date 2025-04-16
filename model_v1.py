@@ -24,9 +24,9 @@ class CrystallizationEnv(gym.Env):
         self.kinetics = CrystKinetics(self.solub_cts, nucl_prim=self.prim, nucl_sec=self.sec, growth=self.growth)
 
         self.path = 'compounds_mom.json'
-        self.temp_init = 323.15
+        self.temp_init = 312.3
         self.x_distrib = np.geomspace(1, 1500, 35)
-        self.n_steps = 24
+        self.n_steps = 100
         self.dt = 7200 / self.n_steps
 
         self.action_space = spaces.Box(low=np.array([-5.0]), high=np.array([5.0]), dtype=np.float64)
@@ -58,10 +58,10 @@ class CrystallizationEnv(gym.Env):
 
     def step(self, action):
         if isinstance(action, np.ndarray):
-            action = float(action[0])
+            action = np.asarray(action).item()
         delta = np.clip(action, -5.0, 5.0)
         self.current_temp += delta
-        self.current_temp = np.clip(self.current_temp, 273.15, 373.15)
+        self.current_temp = np.clip(self.current_temp, 273.15, 335.15)
 
         interpolator = PiecewiseLagrange(self.dt, [self.current_temp], order=1)
         controls = {'temp': interpolator.evaluate_poly}
@@ -85,12 +85,10 @@ class CrystallizationEnv(gym.Env):
         return np.array([self.current_temp], dtype=np.float64), reward, done, False, {"D50": D50, "span": span}
 
     def compute_d50_span(self, results):
-        if self.current_step == 0:
-            return 0.0, 0.0
         final_distrib = results.distrib[-1, :]
+        if np.sum(final_distrib) == 0:
+            return 0.0, 0.0
         x_sizes = results.x_cryst
-        if self.current_step == 1:
-            print(final_distrib)
         pdf = final_distrib / np.sum(final_distrib)
         cdf = np.cumsum(pdf)
         D10 = np.interp(0.10, cdf, x_sizes)
@@ -129,7 +127,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Initialize env, actor, critic
 env = CrystallizationEnv()
-actor = Actor(input_dim=1, hidden_dim=64, output_dim=3).to(device)
+actor = Actor(input_dim=1, hidden_dim=64).to(device)
 critic = Critic(input_dim=1, hidden_dim=64).to(device)
 
 actor_optimizer = optim.Adam(actor.parameters(), lr=1e-3)
