@@ -2,6 +2,10 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import copy
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 
 from PharmaPy.Phases import LiquidPhase, SolidPhase
 from PharmaPy.Kinetics import CrystKinetics
@@ -25,14 +29,17 @@ class CrystallizationEnv(gym.Env):
         self.n_steps = 24
         self.dt = 7200 / self.n_steps
 
-        self.action_space = spaces.Discrete(3)  # 0 = -1°C, 1 = 0°C, 2 = +1°C
-        self.observation_space = spaces.Box(low=np.array([0.0]), high=np.array([100.0]), dtype=np.float32)
+        self.action_space = spaces.Box(low=np.array([-5.0]), high=np.array([5.0]), dtype=np.float64)
+        self.observation_space = spaces.Box(low=np.array([0.0]), high=np.array([100.0]), dtype=np.float64)
 
         # Placeholders for reset
+        conc_init = self.kinetics.get_solubility(self.temp_init)
+        conc_init = (conc_init, 0)
         self.current_step = 0
         self.current_temp = self.temp_init
-        self.liquid = None
-        self.solid = None
+        self.liquid = LiquidPhase(self.path, temp=self.temp_init, vol=0.1, mass_conc=conc_init)
+        distrib = np.zeros_like(self.x_distrib)
+        self.solid = SolidPhase(self.path, temp=self.temp_init, mass_frac=(1, 0), distrib=distrib, x_distrib=self.x_distrib)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -47,11 +54,12 @@ class CrystallizationEnv(gym.Env):
         self.current_temp = self.temp_init
         self.current_step = 0
 
-        return np.array([self.current_temp], dtype=np.float32), {}
+        return np.array([self.current_temp], dtype=np.float64), {}
 
     def step(self, action):
-        # Update temperature
-        delta = action - 1  # -1, 0, or +1
+        if isinstance(action, np.ndarray):
+            action = float(action[0])
+        delta = np.clip(action, -5.0, 5.0)
         self.current_temp += delta
         self.current_temp = np.clip(self.current_temp, 273.15, 373.15)
 
@@ -59,11 +67,11 @@ class CrystallizationEnv(gym.Env):
         controls = {'temp': interpolator.evaluate_poly}
 
         # Run simulation for one step
+        print(self.current_temp)
         CR01 = BatchCryst(target_comp='solute', method='1D-FVM', controls=controls)
         CR01.Kinetics = self.kinetics
         CR01.Phases = (self.liquid, self.solid)
-        results = CR01.solve_unit(self.dt, verbose=False)
-
+        results = CR01.solve_unit(self.dt, verbose=False) 
         D50, span = self.compute_d50_span(CR01.result)
         reward = D50 - span
 
@@ -74,11 +82,15 @@ class CrystallizationEnv(gym.Env):
         self.current_step += 1
         done = self.current_step >= self.n_steps
 
-        return np.array([self.current_temp], dtype=np.float32), reward, done, False, {"D50": D50, "span": span}
+        return np.array([self.current_temp], dtype=np.float64), reward, done, False, {"D50": D50, "span": span}
 
     def compute_d50_span(self, results):
+        if self.current_step == 0:
+            return 0.0, 0.0
         final_distrib = results.distrib[-1, :]
         x_sizes = results.x_cryst
+        if self.current_step == 1:
+            print(final_distrib)
         pdf = final_distrib / np.sum(final_distrib)
         cdf = np.cumsum(pdf)
         D10 = np.interp(0.10, cdf, x_sizes)
@@ -87,20 +99,19 @@ class CrystallizationEnv(gym.Env):
         span = (D90 - D10) / D50
         return D50, span
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 class Actor(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.mu_head = nn.Linear(hidden_dim, 1)     # Mean of the distribution
+        self.log_std = nn.Parameter(torch.zeros(1)) # Learnable log-std
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
-        logits = self.fc2(x)
-        return F.softmax(logits, dim=-1)
+        mu = self.mu_head(x)
+        std = torch.exp(self.log_std)  # ensure std > 0
+        return mu, std
 
 class Critic(nn.Module):
     def __init__(self, input_dim, hidden_dim):
@@ -112,9 +123,7 @@ class Critic(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-import torch
-import torch.optim as optim
-import numpy as np
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -137,31 +146,30 @@ for episode in range(num_episodes):
     done = False
 
     while not done:
-        # Actor picks action
-        probs = actor(state)
-        dist = torch.distributions.Categorical(probs)
+        mu, std = actor(state)
+        dist = torch.distributions.Normal(mu, std)
         action = dist.sample()
+        action_clipped = torch.clamp(action, -5.0, 5.0)
 
-        # Step environment
-        next_state, reward, terminated, truncated, info = env.step(action.item())
+        next_state, reward, terminated, truncated, info = env.step(action_clipped.cpu().numpy())
         done = terminated or truncated
 
         next_state = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0).to(device)
         reward_tensor = torch.tensor([reward], dtype=torch.float32).to(device)
 
-        # Critic evaluation
+        # Critic estimate
         value = critic(state)
         next_value = critic(next_state)
         td_target = reward_tensor + gamma * next_value * (1 - int(done))
         td_error = td_target - value
 
-        # --- Critic Update ---
+        # Critic loss
         critic_loss = td_error.pow(2)
         critic_optimizer.zero_grad()
         critic_loss.backward()
         critic_optimizer.step()
 
-        # --- Actor Update ---
+        # Actor loss
         log_prob = dist.log_prob(action)
         actor_loss = -log_prob * td_error.detach()
         actor_optimizer.zero_grad()
