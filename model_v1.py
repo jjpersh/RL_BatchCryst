@@ -31,8 +31,8 @@ class CrystallizationEnv(gym.Env):
         self.path = 'compounds_mom.json'
         self.temp_init = 312.3
         self.x_distrib = np.geomspace(1, 1500, 35)
-        self.n_steps = 100
-        self.dt = 7200 / self.n_steps
+        self.n_steps = 500
+        self.dt = 3600 / self.n_steps
 
         self.action_space = spaces.Box(low=np.array([-0.5]), high=np.array([0.5]), dtype=np.float64)
         self.observation_space = spaces.Box(low=np.array([0.0]), high=np.array([100.0]), dtype=np.float64)
@@ -77,7 +77,9 @@ class CrystallizationEnv(gym.Env):
         self.CR01.Phases = (self.liquid, self.solid)
         results = self.CR01.solve_unit(self.dt, verbose=False) 
         D50, span = self.compute_d50_span(self.CR01.result)
-        reward = D50 - span
+        if span == 0:
+            span = 1
+        reward = D50 + (1/span) 
 
         # Update phases for next step
         self.liquid = copy.deepcopy(self.CR01.Phases[0])
