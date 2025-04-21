@@ -34,7 +34,7 @@ class CrystallizationEnv(gym.Env):
         self.n_steps = 100
         self.dt = 7200 / self.n_steps
 
-        self.action_space = spaces.Box(low=np.array([-5.0]), high=np.array([5.0]), dtype=np.float64)
+        self.action_space = spaces.Box(low=np.array([-0.5]), high=np.array([0.5]), dtype=np.float64)
         self.observation_space = spaces.Box(low=np.array([0.0]), high=np.array([100.0]), dtype=np.float64)
 
         # Placeholders for reset
@@ -64,15 +64,14 @@ class CrystallizationEnv(gym.Env):
     def step(self, action):
         if isinstance(action, np.ndarray):
             action = np.asarray(action).item()
-        delta = np.clip(action, -5.0, 5.0)
+        delta = np.clip(action, -0.5, 0.5)
         self.current_temp += delta
-        self.current_temp = np.clip(self.current_temp, 273.15, 335.15)
+        self.current_temp = np.clip(self.current_temp, 260.15, 335.15)
 
         interpolator = PiecewiseLagrange(self.dt, [self.current_temp], order=1)
         controls = {'temp': interpolator.evaluate_poly}
 
         # Run simulation for one step
-        print(self.current_temp)
         self.CR01 = BatchCryst(target_comp='solute', method='1D-FVM', controls=controls)
         self.CR01.Kinetics = self.kinetics
         self.CR01.Phases = (self.liquid, self.solid)
@@ -107,14 +106,16 @@ class Actor(nn.Module):
     def __init__(self, input_dim, hidden_dim):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.mu_head = nn.Linear(hidden_dim, 1)     # Mean of the distribution
-        self.log_std = nn.Parameter(torch.zeros(1)) # Learnable log-std
+        self.mu_head = nn.Linear(hidden_dim, 1)
+        self.log_std = nn.Parameter(torch.tensor([0.5]))  # Start with decent exploration
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
         mu = self.mu_head(x)
-        std = torch.exp(self.log_std)  # ensure std > 0
-        return mu, std
+        std = torch.exp(self.log_std)
+
+        mu_squashed = torch.tanh(mu) * 0.5
+        return mu_squashed, std
 
 class Critic(nn.Module):
     def __init__(self, input_dim, hidden_dim):
@@ -152,9 +153,10 @@ for episode in range(num_episodes):
         mu, std = actor(state)
         dist = torch.distributions.Normal(mu, std)
         action = dist.sample()
-        action_clipped = torch.clamp(action, -5.0, 5.0)
+        log_prob = dist.log_prob(action)
+        action_np = action.cpu().detach().numpy()
 
-        next_state, reward, terminated, truncated, info = env.step(action_clipped.cpu().numpy())
+        next_state, reward, terminated, truncated, info = env.step(action_np)
         done = terminated or truncated
 
         next_state = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0).to(device)
