@@ -3,7 +3,7 @@ import sys
 import copy
 
 # Add PharmaPy to path
-sys.path.append(r"C:\Users\jjper\Documents\RESEARCH\takeda\PharmaPy\PharmaPy-master")
+sys.path.append(r"C:\Users\jjper\Documents\RESEARCH\takeda\PharmaPy")
 
 from PharmaPy.Phases import LiquidPhase, SolidPhase
 from PharmaPy.Kinetics import CrystKinetics

@@ -7,6 +7,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+import sys
+
+# Add PharmaPy to path
+sys.path.append(r"C:\Users\jjper\Documents\RESEARCH\takeda\PharmaPy")
+
 from PharmaPy.Phases import LiquidPhase, SolidPhase
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Crystallizers import BatchCryst
@@ -68,16 +73,16 @@ class CrystallizationEnv(gym.Env):
 
         # Run simulation for one step
         print(self.current_temp)
-        CR01 = BatchCryst(target_comp='solute', method='1D-FVM', controls=controls)
-        CR01.Kinetics = self.kinetics
-        CR01.Phases = (self.liquid, self.solid)
-        results = CR01.solve_unit(self.dt, verbose=False) 
-        D50, span = self.compute_d50_span(CR01.result)
+        self.CR01 = BatchCryst(target_comp='solute', method='1D-FVM', controls=controls)
+        self.CR01.Kinetics = self.kinetics
+        self.CR01.Phases = (self.liquid, self.solid)
+        results = self.CR01.solve_unit(self.dt, verbose=False) 
+        D50, span = self.compute_d50_span(self.CR01.result)
         reward = D50 - span
 
         # Update phases for next step
-        self.liquid = copy.deepcopy(CR01.Phases[0])
-        self.solid = copy.deepcopy(CR01.Phases[1])
+        self.liquid = copy.deepcopy(self.CR01.Phases[0])
+        self.solid = copy.deepcopy(self.CR01.Phases[1])
 
         self.current_step += 1
         done = self.current_step >= self.n_steps
