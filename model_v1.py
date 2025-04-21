@@ -202,10 +202,20 @@ finally:
     log_df = pd.DataFrame(episode_log)
     log_df.to_csv("episode_summary.csv", index=False)
 
-    # Save top temperature profiles
-    os.makedirs("top_profiles", exist_ok=True)
-    for i, (reward, ep, profile) in enumerate(top_profiles):
-        df = pd.DataFrame(profile, columns=["Temperature"])
-        df.to_csv(f"top_profiles/episode_{ep}_reward_{reward:.2f}.csv", index=False)
+    # Save top 5 temperature profiles in a single CSV
+    records = []
+    for reward, ep, profile in top_profiles:
+        for step, temp in enumerate(profile):
+            records.append({
+                "episode": ep,
+                "reward": reward,
+                "step": step,
+                "time": step * env.dt,
+                "temperature": temp
+            })
+    
+    top_df = pd.DataFrame(records)
+    top_df.to_csv("top_5_temperature_profiles.csv", index=False)
 
     print("Logs and top profiles saved.")
+
