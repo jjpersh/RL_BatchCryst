@@ -137,7 +137,7 @@ actor_optimizer = optim.Adam(actor.parameters(), lr=1e-3)
 critic_optimizer = optim.Adam(critic.parameters(), lr=1e-3)
 
 gamma = 0.99
-num_episodes = 20
+num_episodes = 200
 
 episode_log = []
 top_profiles = []
