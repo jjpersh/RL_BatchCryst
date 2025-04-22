@@ -9,9 +9,8 @@ import torch.optim as optim
 import pandas as pd
 import sys
 import os
-import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
-from IPython.display import clear_output
+
 
 # Add PharmaPy to path
 sys.path.append(r"C:\Users\jjper\Documents\RESEARCH\takeda\PharmaPy")
@@ -20,6 +19,11 @@ from PharmaPy.Phases import LiquidPhase, SolidPhase
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Crystallizers import BatchCryst
 from PharmaPy.Interpolation import PiecewiseLagrange
+
+
+# Set the trial name for saving logs
+trialname = input("Enter Trial Name:")
+writer = SummaryWriter(log_dir=f"runs/{trialname}")
 
 class CrystallizationEnv(gym.Env):
     def __init__(self):
@@ -31,10 +35,10 @@ class CrystallizationEnv(gym.Env):
         self.kinetics = CrystKinetics(self.solub_cts, nucl_prim=self.prim, nucl_sec=self.sec, growth=self.growth)
 
         self.path = 'compounds_mom.json'
-        self.temp_init = 312.3
+        self.temp_init = 323.15
         self.x_distrib = np.geomspace(1, 1500, 35)
         self.n_steps = 500
-        self.dt = 3600 / self.n_steps
+        self.dt = 7200 / self.n_steps
 
         self.action_space = spaces.Box(low=np.array([-0.5]), high=np.array([0.5]), dtype=np.float64)
         self.observation_space = spaces.Box(low=np.array([0.0]), high=np.array([100.0]), dtype=np.float64)
@@ -63,7 +67,7 @@ class CrystallizationEnv(gym.Env):
             action = np.asarray(action).item()
         delta = np.clip(action, -0.5, 0.5)
         self.current_temp += delta
-        self.current_temp = np.clip(self.current_temp, 260.15, 335.15)
+        self.current_temp = np.clip(self.current_temp, 285.15, 335.15)
 
         interpolator = PiecewiseLagrange(self.dt, [self.current_temp], order=1)
         controls = {'temp': interpolator.evaluate_poly}
@@ -71,19 +75,21 @@ class CrystallizationEnv(gym.Env):
         self.CR01 = BatchCryst(target_comp='solute', method='1D-FVM', controls=controls)
         self.CR01.Kinetics = self.kinetics
         self.CR01.Phases = (self.liquid, self.solid)
-        results = self.CR01.solve_unit(self.dt, verbose=False)
+        results = self.CR01.solve_unit(self.dt, verbose=False) 
         D50, span = self.compute_d50_span(self.CR01.result)
         if span == 0:
             span = 1
-        reward = D50 + (1 / span)
+        # Apply time penalty to discourage long episodes
+        reward = D50*2 + (1/span)*.01 - self.current_step*0.01
 
         self.liquid = copy.deepcopy(self.CR01.Phases[0])
         self.solid = copy.deepcopy(self.CR01.Phases[1])
 
         self.current_step += 1
-        done = self.current_step >= self.n_steps
+        # Episode terminates when temperature reaches 290 K
+        done = self.current_temp <= 290.0
         return np.array([self.current_temp], dtype=np.float64), reward, done, False, {"D50": D50, "span": span}
-
+    
     def compute_d50_span(self, results):
         final_distrib = results.distrib[-1, :]
         if np.sum(final_distrib) == 0:
@@ -112,7 +118,6 @@ class Actor(nn.Module):
         mu_squashed = torch.tanh(mu) * 0.5
         return mu_squashed, std
 
-
 class Critic(nn.Module):
     def __init__(self, input_dim, hidden_dim):
         super().__init__()
@@ -134,19 +139,13 @@ actor_optimizer = optim.Adam(actor.parameters(), lr=1e-3)
 critic_optimizer = optim.Adam(critic.parameters(), lr=1e-3)
 
 gamma = 0.99
-num_episodes = 20
+num_episodes = 200
 
 episode_log = []
 top_profiles = []
+all_actions = []
+all_entropies = []
 
-# TensorBoard writer
-writer = SummaryWriter("runs/crystallization_rl")
-
-# Live plot setup
-# plt.ion()
-# fig, axs = plt.subplots(2, 1, figsize=(10, 8))
-# fig.suptitle("RL Progress (Real-Time)")
-reward_history = []
 
 try:
     for episode in range(num_episodes):
@@ -157,11 +156,20 @@ try:
         done = False
         temp_profile = []
 
+        actions_taken = []
+        episode_entropies = []  # <--- NEW: store entropies for this episode only
+
         while not done:
             mu, std = actor(state)
             dist = torch.distributions.Normal(mu, std)
             action = dist.sample()
+            log_prob = dist.log_prob(action)
+            entropy = dist.entropy()
+
             action_np = action.cpu().detach().numpy()
+            actions_taken.append(action_np.item())
+            episode_entropies.append(entropy.item())  # <--- Track only current episode's entropy
+            all_actions.append(action_np.item())      # <--- Still tracking cumulative actions
 
             next_state, reward, terminated, truncated, info = env.step(action_np)
             done = terminated or truncated
@@ -181,7 +189,6 @@ try:
             critic_loss.backward()
             critic_optimizer.step()
 
-            log_prob = dist.log_prob(action)
             actor_loss = -log_prob * td_error.detach()
             actor_optimizer.zero_grad()
             actor_loss.backward()
@@ -190,8 +197,18 @@ try:
             state = next_state
             total_reward += reward
 
+        # === Logging at the END of the episode ===
+        writer.add_histogram("Cumulative/Actions_Sampled", np.array(all_actions), episode)
+        writer.add_scalar("Episode/Mean_Entropy", np.mean(episode_entropies), episode)
+        writer.add_scalar("Episode/Total_Reward", total_reward, episode)
+
         D50 = info.get("D50", 0)
         span = info.get("span", 0)
+
+        writer.add_scalar("Episode/D50", D50, episode)
+        writer.add_scalar("Episode/Span", span, episode)
+        writer.add_scalar("Loss/Actor", actor_loss.item(), episode)
+        writer.add_scalar("Loss/Critic", critic_loss.item(), episode)
 
         episode_log.append({
             "episode": episode + 1,
@@ -200,13 +217,6 @@ try:
             "span": span
         })
 
-        writer.add_scalar("Reward/Total", total_reward, episode)
-        writer.add_scalar("Crystal/D50", D50, episode)
-        writer.add_scalar("Crystal/Span", span, episode)
-        writer.add_scalar("Loss/Actor", actor_loss.item(), episode)
-        writer.add_scalar("Loss/Critic", critic_loss.item(), episode)
-
-        # Save top 5 profiles
         if len(top_profiles) < 5:
             top_profiles.append((total_reward, episode + 1, temp_profile))
             top_profiles.sort(key=lambda x: x[0], reverse=True)
@@ -214,36 +224,20 @@ try:
             top_profiles[-1] = (total_reward, episode + 1, temp_profile)
             top_profiles.sort(key=lambda x: x[0], reverse=True)
 
-        reward_history.append(total_reward)
-
-        # Live plot update
-        # clear_output(wait=True)
-        # axs[0].cla()
-        # axs[0].plot(reward_history, label="Total Reward")
-        # axs[0].set_title("Episode Reward")
-        # axs[0].legend()
-
-        # axs[1].cla()
-        # axs[1].plot(temp_profile, label="Temperature (K)")
-        # axs[1].set_title("Temperature Profile (Last Episode)")
-        # axs[1].legend()
-        # axs[1].text(0.05, 0.95, f"D50 = {D50:.2f}, Span = {span:.2f}", transform=axs[1].transAxes,
-        #             verticalalignment='top', fontsize=10, bbox=dict(facecolor='white', alpha=0.7))
-
-        # plt.pause(0.01)
-
         print(f"Episode {episode+1}: Reward = {total_reward:.2f}, D50 = {D50:.2f}, Span = {span:.2f}")
+
 
 finally:
     writer.close()
-    # plt.ioff()
-    # plt.show()
+
+    # Create data directory if it doesn't exist
+    os.makedirs("data", exist_ok=True)
 
     # Save episode log
     log_df = pd.DataFrame(episode_log)
-    log_df.to_csv("episode_summary.csv", index=False)
+    log_df.to_csv(os.path.join("data", trialname + "_episode_summary.csv"), index=False)
 
-    # Save top 5 temperature profiles
+    # Save top 5 temperature profiles in a single CSV
     records = []
     for reward, ep, profile in top_profiles:
         for step, temp in enumerate(profile):
@@ -254,30 +248,9 @@ finally:
                 "time": step * env.dt,
                 "temperature": temp
             })
-
-    top_df = pd.DataFrame(records)
-    top_df.to_csv("top_5_temperature_profiles.csv", index=False)
-
-    # Final policy plot
-    temps = torch.linspace(273.15, 335.15, 100).unsqueeze(1).to(device)
-    with torch.no_grad():
-        mus, stds = actor(temps)
-
-    mus = mus.cpu().numpy()
-    stds = stds.cpu().numpy()
-    temps = temps.cpu().numpy()
-
-    # plt.figure(figsize=(8, 5))
-    # plt.plot(temps, mus, label="Mean Action")
-    # plt.fill_between(temps.flatten(), mus.flatten() - stds.flatten(), mus.flatten() + stds.flatten(), alpha=0.3, label="Std Dev")
-    # plt.title("Final Policy: Action vs Temperature")
-    # plt.xlabel("Temperature (K)")
-    # plt.ylabel("Action (Delta T)")
-    # plt.grid(True)
-    # plt.legend()
-    # plt.tight_layout()
-    # plt.savefig("final_policy_plot.png")
-    # plt.show()
-
-    print("Logs and top profiles saved.")
     
+    top_df = pd.DataFrame(records)
+    top_df.to_csv(os.path.join("data", trialname + "_top_5.csv"), index=False)
+
+    print("Logs and top profiles saved to data directory.")
+
