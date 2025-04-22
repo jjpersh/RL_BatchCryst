@@ -18,6 +18,11 @@ from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Crystallizers import BatchCryst
 from PharmaPy.Interpolation import PiecewiseLagrange
 
+
+# Set the trial name for saving logs
+trialname = "7200_50weightx2"
+
+
 class CrystallizationEnv(gym.Env):
     def __init__(self):
         super(CrystallizationEnv, self).__init__()
@@ -28,10 +33,10 @@ class CrystallizationEnv(gym.Env):
         self.kinetics = CrystKinetics(self.solub_cts, nucl_prim=self.prim, nucl_sec=self.sec, growth=self.growth)
 
         self.path = 'compounds_mom.json'
-        self.temp_init = 312.3
+        self.temp_init = 323.15
         self.x_distrib = np.geomspace(1, 1500, 35)
         self.n_steps = 500
-        self.dt = 3600 / self.n_steps
+        self.dt = 7200 / self.n_steps
 
         self.action_space = spaces.Box(low=np.array([-0.5]), high=np.array([0.5]), dtype=np.float64)
         self.observation_space = spaces.Box(low=np.array([0.0]), high=np.array([100.0]), dtype=np.float64)
@@ -60,7 +65,7 @@ class CrystallizationEnv(gym.Env):
             action = np.asarray(action).item()
         delta = np.clip(action, -0.5, 0.5)
         self.current_temp += delta
-        self.current_temp = np.clip(self.current_temp, 260.15, 335.15)
+        self.current_temp = np.clip(self.current_temp, 285.15, 335.15)
 
         interpolator = PiecewiseLagrange(self.dt, [self.current_temp], order=1)
         controls = {'temp': interpolator.evaluate_poly}
@@ -72,7 +77,7 @@ class CrystallizationEnv(gym.Env):
         D50, span = self.compute_d50_span(self.CR01.result)
         if span == 0:
             span = 1
-        reward = D50 + (1/span) 
+        reward = D50*2 + (1/span)*.01 - self.current_step*0.01
 
         self.liquid = copy.deepcopy(self.CR01.Phases[0])
         self.solid = copy.deepcopy(self.CR01.Phases[1])
@@ -200,7 +205,7 @@ try:
 finally:
     # Save episode log
     log_df = pd.DataFrame(episode_log)
-    log_df.to_csv("episode_summary.csv", index=False)
+    log_df.to_csv(trialname + "_episode_summary.csv", index=False)
 
     # Save top 5 temperature profiles in a single CSV
     records = []
@@ -215,7 +220,7 @@ finally:
             })
     
     top_df = pd.DataFrame(records)
-    top_df.to_csv("top_5_temperature_profiles.csv", index=False)
+    top_df.to_csv(trialname + "_top_5.csv", index=False)
 
     print("Logs and top profiles saved.")
 
