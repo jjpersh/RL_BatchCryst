@@ -11,7 +11,6 @@ import sys
 import os
 from torch.utils.tensorboard import SummaryWriter
 
-
 # Add PharmaPy to path
 sys.path.append(r"C:\Users\jjper\Documents\RESEARCH\takeda\PharmaPy")
 
@@ -20,8 +19,6 @@ from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Crystallizers import BatchCryst
 from PharmaPy.Interpolation import PiecewiseLagrange
 
-
-# Set the trial name for saving logs
 trialname = input("Enter Trial Name:")
 writer = SummaryWriter(log_dir=f"runs/{trialname}")
 
@@ -37,8 +34,8 @@ class CrystallizationEnv(gym.Env):
         self.path = 'compounds_mom.json'
         self.temp_init = 323.15
         self.x_distrib = np.geomspace(1, 1500, 35)
-        self.n_steps = 500
-        self.dt = 7200 / self.n_steps
+        self.n_steps = 4000  # Increased cap
+        self.dt = 7200 / 500
 
         self.action_space = spaces.Box(low=np.array([-0.5]), high=np.array([0.5]), dtype=np.float64)
         self.observation_space = spaces.Box(low=np.array([0.0]), high=np.array([100.0]), dtype=np.float64)
@@ -77,17 +74,32 @@ class CrystallizationEnv(gym.Env):
         self.CR01.Phases = (self.liquid, self.solid)
         results = self.CR01.solve_unit(self.dt, verbose=False) 
         D50, span = self.compute_d50_span(self.CR01.result)
+
         if span == 0:
-            span = 1
-        # Apply time penalty to discourage long episodes
-        reward = D50*2 + (1/span)*.01 - self.current_step*0.01
+            span = 2
+
+        # Encourage smooth cooling
+        time_penalty = self.current_step * 0.001
+
+        if delta > 0:
+            cooling_penalty = 5.0 * delta
+            gentle_bonus = 0.0
+        elif -0.02 <= delta <= 0:
+            cooling_penalty = 0.0
+            gentle_bonus = 100
+        else:
+            cooling_penalty = abs(delta)*.1
+            gentle_bonus = 0.0
+
+        reward = D50 * 5 + (1 / span) - time_penalty - cooling_penalty + gentle_bonus
+
 
         self.liquid = copy.deepcopy(self.CR01.Phases[0])
         self.solid = copy.deepcopy(self.CR01.Phases[1])
 
         self.current_step += 1
-        # Episode terminates when temperature reaches 290 K
-        done = self.current_temp <= 290.0
+        done = self.current_temp <= 290.0 or self.current_step >= self.n_steps
+        
         return np.array([self.current_temp], dtype=np.float64), reward, done, False, {"D50": D50, "span": span}
     
     def compute_d50_span(self, results):
@@ -102,7 +114,6 @@ class CrystallizationEnv(gym.Env):
         D90 = np.interp(0.90, cdf, x_sizes)
         span = (D90 - D10) / D50
         return D50, span
-
 
 class Actor(nn.Module):
     def __init__(self, input_dim, hidden_dim):
@@ -128,7 +139,6 @@ class Critic(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 env = CrystallizationEnv()
@@ -139,13 +149,12 @@ actor_optimizer = optim.Adam(actor.parameters(), lr=1e-3)
 critic_optimizer = optim.Adam(critic.parameters(), lr=1e-3)
 
 gamma = 0.99
-num_episodes = 200
+num_episodes = 500
 
 episode_log = []
 top_profiles = []
 all_actions = []
 all_entropies = []
-
 
 try:
     for episode in range(num_episodes):
@@ -157,7 +166,7 @@ try:
         temp_profile = []
 
         actions_taken = []
-        episode_entropies = []  # <--- NEW: store entropies for this episode only
+        episode_entropies = []
 
         while not done:
             mu, std = actor(state)
@@ -168,8 +177,8 @@ try:
 
             action_np = action.cpu().detach().numpy()
             actions_taken.append(action_np.item())
-            episode_entropies.append(entropy.item())  # <--- Track only current episode's entropy
-            all_actions.append(action_np.item())      # <--- Still tracking cumulative actions
+            episode_entropies.append(entropy.item())
+            all_actions.append(action_np.item())
 
             next_state, reward, terminated, truncated, info = env.step(action_np)
             done = terminated or truncated
@@ -189,7 +198,8 @@ try:
             critic_loss.backward()
             critic_optimizer.step()
 
-            actor_loss = -log_prob * td_error.detach()
+            entropy_reg = 0.01  # exploration boost
+            actor_loss = -log_prob * td_error.detach() - entropy_reg * entropy
             actor_optimizer.zero_grad()
             actor_loss.backward()
             actor_optimizer.step()
@@ -197,7 +207,6 @@ try:
             state = next_state
             total_reward += reward
 
-        # === Logging at the END of the episode ===
         writer.add_histogram("Cumulative/Actions_Sampled", np.array(all_actions), episode)
         writer.add_scalar("Episode/Mean_Entropy", np.mean(episode_entropies), episode)
         writer.add_scalar("Episode/Total_Reward", total_reward, episode)
@@ -226,18 +235,13 @@ try:
 
         print(f"Episode {episode+1}: Reward = {total_reward:.2f}, D50 = {D50:.2f}, Span = {span:.2f}")
 
-
 finally:
     writer.close()
 
-    # Create data directory if it doesn't exist
     os.makedirs("data", exist_ok=True)
-
-    # Save episode log
     log_df = pd.DataFrame(episode_log)
     log_df.to_csv(os.path.join("data", trialname + "_episode_summary.csv"), index=False)
 
-    # Save top 5 temperature profiles in a single CSV
     records = []
     for reward, ep, profile in top_profiles:
         for step, temp in enumerate(profile):
@@ -253,4 +257,3 @@ finally:
     top_df.to_csv(os.path.join("data", trialname + "_top_5.csv"), index=False)
 
     print("Logs and top profiles saved to data directory.")
-
